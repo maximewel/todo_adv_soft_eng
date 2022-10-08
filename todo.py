@@ -1,6 +1,7 @@
 import logging
 from aiohttp import web
 import aiohttp_cors
+import aiomysql
 
 TODOS = {
     0: {'title': 'build an API', 'order': 1, 'completed': False},
@@ -8,10 +9,28 @@ TODOS = {
     2: {'title': 'profit!', 'order': 3, 'completed': False}
 }
 
-def get_all_todos(request):
-    return web.json_response([
-        {'id': key, **todo} for key, todo in TODOS.items()
-    ])
+def completed_to_bool(todo: dict) -> None:
+    try:
+        todo['completed'] = bool(todo['completed'])
+        todo['order'] = todo.pop('position')
+    except KeyError:
+        print(f"OY")
+
+async def get_all_todos(request):
+    db: aiomysql.Connection = request.app['db']
+    cursor: aiomysql.Cursor = await db.cursor()
+    sql = "SELECT * FROM todo"
+    await cursor.execute(sql)
+    res = await cursor.fetchall()
+
+    for r in res:
+        completed_to_bool(r)
+
+    print(res)
+
+    return web.json_response(
+        res
+    )
 
 def remove_all_todos(request):
     TODOS.clear()
@@ -66,24 +85,45 @@ def remove_todo(request):
 
     return web.Response(status=204)
 
-app = web.Application()
+async def create_connection() -> aiomysql.Connection:
+    conn = await aiomysql.connect(
+                                    host='127.0.0.1', port=3306,
+                                    user='root', password='root', db='todo_db',
+                                    cursorclass = aiomysql.cursors.DictCursor
+                                )
+    return conn
 
-# Configure default CORS settings.
-cors = aiohttp_cors.setup(app, defaults={
-    "*": aiohttp_cors.ResourceOptions(
-            allow_credentials=True,
-            expose_headers="*",
-            allow_headers="*",
-            allow_methods="*",
-        )
-})
+async def init_router(app: web.Application) -> None:
+    # Configure default CORS settings.
+    cors = aiohttp_cors.setup(app, defaults={
+        "*": aiohttp_cors.ResourceOptions(
+                allow_credentials=True,
+                expose_headers="*",
+                allow_headers="*",
+                allow_methods="*",
+            )
+    })
 
-cors.add(app.router.add_get('/todos/', get_all_todos, name='all_todos'))
-cors.add(app.router.add_delete('/todos/', remove_all_todos, name='remove_todos'))
-cors.add(app.router.add_post('/todos/', create_todo, name='create_todo'))
-cors.add(app.router.add_get('/todos/{id:\d+}', get_one_todo, name='one_todo'))
-cors.add(app.router.add_patch('/todos/{id:\d+}', update_todo, name='update_todo'))
-cors.add(app.router.add_delete('/todos/{id:\d+}', remove_todo, name='remove_todo'))
+    cors.add(app.router.add_get('/todos/', get_all_todos, name='all_todos'))
+    cors.add(app.router.add_delete('/todos/', remove_all_todos, name='remove_todos'))
+    cors.add(app.router.add_post('/todos/', create_todo, name='create_todo'))
+    cors.add(app.router.add_get('/todos/{id:\d+}', get_one_todo, name='one_todo'))
+    cors.add(app.router.add_patch('/todos/{id:\d+}', update_todo, name='update_todo'))
+    cors.add(app.router.add_delete('/todos/{id:\d+}', remove_todo, name='remove_todo'))
 
-logging.basicConfig(level=logging.DEBUG)
-web.run_app(app, port=8080)
+async def app_factory() -> web.Application:
+    app = web.Application()
+
+    #Add DB to app
+    db = await create_connection()
+    app['db'] = db
+
+    #Add routes
+    await init_router(app)
+
+    logging.basicConfig(level=logging.DEBUG)
+
+    return app
+
+if __name__ == '__main__':
+    web.run_app(app_factory(), port=8080)
